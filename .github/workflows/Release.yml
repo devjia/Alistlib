@@ -1,0 +1,98 @@
+name: release xcframework
+
+on:
+ workflow_dispatch:
+    inputs:
+      version:
+        description: '输入版本号'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Get Version
+        run: |
+          echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Checkout Current
+        uses: actions/checkout@v4
+        with:
+          path: 'current'
+          
+      - name: Checkout Alist-ios
+        uses: actions/checkout@v4
+        with:
+          repository: 'gendago/alist-ios'
+          ref: 'main'
+          path: 'alist-ios'
+          submodules: true
+      
+      - name: Build Frameworks
+        run: |
+          cd alist-ios
+          sh ./fetch-web.sh
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          go get golang.org/x/mobile/cmd/gomobile
+          go get golang.org/x/mobile/cmd/gobind
+          gomobile init
+          gomobile bind -v -target ios -bundleid app.inch.Alistlib -o Alistlib.xcframework -ldflags "-s -w" github.com/alist-org/alist/v3/alistlib
+
+          cp ../current/Template.plist Info.plist
+          plutil -replace CFBundleShortVersionString -string ${{ ENV.VERSION }} Info.plist
+          cp Info.plist Alistlib.xcframework/ios-arm64/Alistlib.framework/Info.plist
+
+          plutil -replace CFBundleSupportedPlatforms -array Info.plist
+          plutil -insert CFBundleSupportedPlatforms.0 -string "iPhoneSimulator" Info.plist
+          cp Info.plist Alistlib.xcframework/ios-arm64_x86_64-simulator/Alistlib.framework/Info.plist
+
+          zip -r -X "Alistlib.xcframework.zip" "Alistlib.xcframework"
+          
+      - name: Compute Checksum
+        run: |
+          echo "CHECKSUM=$(swift package compute-checksum ./alist-ios/Alistlib.xcframework.zip)" >> $GITHUB_ENV
+
+      - name: Update Package.swift
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd current
+          DOWNLOAD_URL='https://github.com/devjia/Alistlib/releases/download/${{ env.VERSION }}/Alistlib.xcframework.zip'
+          CHECKSUM=${{ env.CHECKSUM }}
+          sed -i '' "s#\(url: \".*\"\),#url: \"${DOWNLOAD_URL}\",#" Package.swift
+          sed -i '' "s#\(checksum: \".*\)#checksum: \"${CHECKSUM}\"#" Package.swift
+          
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add Package.swift
+          git commit -m "Update version to ${{ ENV.VERSION }}"
+          git push
+          
+      - name: Create Release
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          body: |
+            ```swift
+            .binaryTarget(
+              name: "Alistlib",
+              url: "https://github.com/devjia/Alistlib/releases/download/${{ env.VERSION }}/Alistlib.xcframework.zip",
+              checksum: "${{ env.CHECKSUM }}"
+            )
+            ```
+          allowUpdates: true
+          artifacts: "alist-ios/Alistlib.xcframework.zip"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ env.VERSION }}
